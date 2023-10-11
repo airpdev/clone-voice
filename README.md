@@ -9,14 +9,22 @@
 
 ## 🚀  APIs
 
-- Generate voice from transcript
-  * GET/POST: https://bvoice.dev.bhuman.ai/generate_voice
-  * Params: transcript, denoised
-  * Response: API returns s3 bucket url for generated voice.
-  * Description: Generate voice from text (transcript field) using model and upload it to s3 bucket.
+- Add voice with referencen and dataset
+  * POST: https://bvoice.dev.bhuman.ai/add_voice
+  * Params: voice_id, bark_ref_region, bark_ref_bucket, bark_ref_key, dataset_region, dataset_bucket, dataset_key
+  * Response: API returns status result with voice id.
+  * Description: Generate .npz file and train rvc model
 
 - Clone voice from reference audio and transcript
   * GET/POST: https://bvoice.dev.bhuman.ai/clone_voice
-  * Params: voice_id, reference_region, reference_bucket, reference_key, transcript, dataset_region, dataset_bucket, dataset_key, denoised
-  * Response: API returns s3 bucket url for cloned voice.
+  * Params: voice_id, reference_region, reference_bucket, reference_key, transcript, total_try_count
+  * Response: API returns s3 bucket urls for cloned voices.
   * Description: Clone voice from text and reference audio(s3 url) using model and passing it to rvc model.
+
+- Select the best prosody
+  * POST: https://bvoice.dev.bhuman.ai/prosody_select
+  * Params: voice_id, reference_region, reference_bucket, reference_key, transcript, candidate_count, urls
+  * Response: API returns the selected urls.
+  * Description: Select the closest audios (candidate count) with reference audio.
+
+

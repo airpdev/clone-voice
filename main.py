@@ -24,7 +24,7 @@ from pydub.silence import split_on_silence
 # from sklearn.metrics.pairwise import cosine_similarity
 from hubert.pre_kmeans_hubert import CustomHubert
 from hubert.customtokenizer import CustomTokenizer
-from bark.api import generate_audio_new
+from bark.api import generate_audio_new, generate_audio
 from bark.generation import load_codec_model, SAMPLE_RATE, preload_models_new
 from scipy.io.wavfile import write as write_wav
 from fastapi import FastAPI, Query, Request
@@ -67,25 +67,21 @@ lock = asyncio.Lock()
 def root():
     return time.time()
 
-@app.get("/generate_voice")
-@limiter.limit("500/minute")
-async def generate_voice(request: Request, transcript: str = Query(None), denoised: bool = Query(False)):
-    loop = asyncio.get_event_loop()
-    s3_url, voice_id = await loop.run_in_executor(None, process_generate_voice, transcript)
-    if denoised == False:
-        return {"voice_id" : voice_id, "voice_url" : s3_url, "voice_clean_data" : ""}
-    voice_response = await loop.run_in_executor(None, cleanvoice, s3_url)
-    return {"voice_id" : voice_id, "voice_url" : s3_url, "voice_clean_data" : voice_response}
-    
+class GenInfo(BaseModel):
+    voice_id: str
+    transcript: str
+    prefix: str
+
 @app.post("/generate_voice")
 @limiter.limit("500/minute")
-async def generate_voice(request: Request, transcript: str = Query(None), denoised: bool = Query(False)):
+async def generate_voice(request: Request, payload: GenInfo):
     loop = asyncio.get_event_loop()
-    s3_url, voice_id = await loop.run_in_executor(None, process_generate_voice, transcript)
-    if denoised == False:
-        return {"voice_id" : voice_id, "voice_url" : s3_url, "voice_clean_data" : ""}
-    voice_response = await loop.run_in_executor(None, cleanvoice, s3_url)
-    return {"voice_id" : voice_id, "voice_url" : s3_url, "voice_clean_data" : voice_response}
+    voice_response = await loop.run_in_executor(None, 
+                                                process_generate_voice, 
+                                                payload.voice_id, 
+                                                payload.transcript, 
+                                                payload.prefix)
+    return voice_response
 
 @app.post("/clean_voice")
 @limiter.limit("500/minute")
@@ -115,6 +111,10 @@ class CloneInfo(BaseModel):
     transcript: str
     total_try_count: int
 
+class ConvertInfo(BaseModel):
+    voice_id: str
+    voice_b_url: str
+
 def merge_audio_files(input_files, output_file):
     # Create the ffmpeg command
     command = ['ffmpeg']
@@ -137,6 +137,33 @@ def merge_audio_files(input_files, output_file):
     except subprocess.CalledProcessError as e:
         print(f"An error occurred while merging the audio files: {e}")
 
+@app.post("/convert_voice")
+@limiter.limit("500/minute")
+async def convert_voice(request: Request, payload: ConvertInfo):
+    b_file_path = "output/" + str(uuid.uuid4()) + ".wav"
+    b_file_path = download_file_url(payload.voice_b_url, b_file_path)
+    voices = []
+    voices.append(b_file_path)
+    converted_array = process_rvc_model(payload.voice_id, voices)
+    
+    audio_name = str(uuid.uuid4())
+    output_path = "output/" + audio_name + ".wav"
+    stream = ffmpeg.input(converted_array[0])
+    stream = ffmpeg.output(stream, output_path, acodec='pcm_s24le', ar="48000", ac="1")
+    ffmpeg.run(stream)
+
+    bucket_name = 'voice-dev1'
+    object_name = 'tmp_audio/' + audio_name + ".wav"
+    extra_args = {'ACL': 'public-read'}
+    session = boto3.Session(
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY
+    )
+    s3 = session.client('s3')
+    s3.upload_file(output_path, bucket_name, object_name, ExtraArgs=extra_args)
+    s3_url = "https://{}.s3.us-east-2.amazonaws.com/{}".format(bucket_name, object_name)
+    return {"status" : "success", "voice_id" : payload.voice_id, "voice_url" : s3_url}
+
 @app.post("/clone_voice")
 @limiter.limit("500/minute")
 async def clone_voice(request: Request, payload: CloneInfo):
@@ -148,7 +175,7 @@ async def clone_voice(request: Request, payload: CloneInfo):
         return {"status" : "failed", "voice_id" : payload.voice_id, "msg" : "pth file for voice isn't existed."}
 
     loop = asyncio.get_event_loop()
-    sentences = nltk.sent_tokenize(payload.transcript.replace("\n", " ").strip())
+    sentences = nltk.sent_tokenize(payload.transcript)
     print(sentences)
     silence = np.zeros(int(0.03 * SAMPLE_RATE))  
     selected_files = []
@@ -181,7 +208,10 @@ async def clone_voice(request: Request, payload: CloneInfo):
     for temp in temp_files:
         os.remove(temp)
     print("finished cloning with rvc model")
+    print(s3_url)
 
+    if payload.gen_prefix == "music":
+        return {"status" : "success", "voice_id" : payload.voice_id, "voice_url" : s3_url, "voice_clean_data" : ""}
     response = await loop.run_in_executor(None, cleanvoice, s3_url)
     return {"status" : "success", "voice_id" : payload.voice_id, "voice_url" : s3_url, "voice_clean_data" : response}
 
@@ -251,7 +281,7 @@ def remove_silence(audio, silence_threshold=-50, min_silence_duration=500):
     return non_silent_audio
 
 def get_reference(file_path, voice_id):
-    reference_path = "references/reference.wav" #"output/" + voice_id + "_ref.wav"
+    reference_path = "references/reference-rob1.wav" #"output/" + voice_id + "_ref.wav"
     if os.path.exists(reference_path):
         return reference_path
     audio = AudioSegment.from_file(file_path)
@@ -521,7 +551,15 @@ def filter_prosody_array(audio_files, reference_path, transcript):
     # sorted_score_array = sorted(audio_files, key=lambda x:get_prosody_similarity(x, reference_path))
     sorted_transcript_array = filter_transcript_array(audio_files, int(len(audio_files) / 2), transcript)
     sorted_score_array = sorted(sorted_transcript_array, key=lambda x:get_mean_pitch(x), reverse=True)
-    return sorted_score_array
+    filtered_array = []
+    if len(sorted_score_array) > 0:
+        filtered_array.append(sorted_score_array[0])
+    if len(sorted_score_array) > 1:
+        filtered_array.append(sorted_score_array[1])
+    if len(sorted_score_array) > 2:
+        filtered_array.append(sorted_score_array[2])
+    duration_array = filter_duration_array(filtered_array, 1)
+    return duration_array
 
 def filter_audio_array(file_array, candidate_count, reference_input, transcript):
     candidate_array = []
@@ -615,30 +653,31 @@ def get_voice(url: str):
     time.sleep(3)
     return get_voice(url)
 
-def process_generate_voice(transcript: str):
+def process_generate_voice(voice_id: str, transcript: str, prefix: str):
+    if prefix == "music":
+        transcript = "♪ " + transcript + " ♪"
+    audio_array = generate_audio(transcript)
     
-    voice_id = uuid.uuid4()
-    full_generation, audio_array = generate_audio(transcript, output_full=True)
-    
-    output_path = "output/" + str(voice_id) + ".wav"
+    output_path = "output/" + str(uuid.uuid4()) + ".wav"
     write_wav(output_path, SAMPLE_RATE, audio_array)
 
-    # saving .npz file
-    npz_path = 'bark/assets/prompts/' + str(voice_id) + '.npz'
-    np.savez(npz_path, fine_prompt=full_generation["fine_prompt"], coarse_prompt=full_generation["coarse_prompt"], semantic_prompt=full_generation["semantic_prompt"])
+    voices = []
+    voices.append(output_path)
+    # converted_array = process_rvc_model(voice_id, voices)
 
+    bucket_name = 'voice-dev1'
+    object_name = 'tmp_audio/' + str(uuid.uuid4()) + ".wav"
+    extra_args = {'ACL': 'public-read'}
     session = boto3.Session(
         aws_access_key_id=AWS_ACCESS_KEY_ID,
         aws_secret_access_key=AWS_SECRET_ACCESS_KEY
     )
     s3 = session.client('s3')
-    bucket_name = 'tmp-dev-283501'
-    object_name = 'tmp_audio/' + str(voice_id) + ".wav"
-    extra_args = {'ACL': 'public-read'}
     s3.upload_file(output_path, bucket_name, object_name, ExtraArgs=extra_args)
     s3_url = "https://{}.s3.us-east-2.amazonaws.com/{}".format(bucket_name, object_name)
     os.remove(output_path)
-    return s3_url, voice_id
+    # os.remove(converted_array[0])
+    return {"status" : "success", "voice_id" : voice_id, "voice_url" : s3_url}
 
 
 def download_s3_file(voice_region: str, 

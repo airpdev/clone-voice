@@ -297,9 +297,6 @@ def generate_audio_new(
     Returns:
         numpy audio array at sample frequency 24khz
     """
-    if gen_prefix:
-        gen_prefix = gen_prefix + ' '
-
     silence = np.zeros(int(long_gen_silence_secs * SAMPLE_RATE))
     gen_audio = []
     if text:
@@ -323,7 +320,9 @@ def generate_audio_new(
     for input_text in tqdm.tqdm(gen_sections, desc='Generation section'):
         if len(input_text) == 0:
             continue
-        input_text = gen_prefix + input_text
+        if gen_prefix:
+            input_text = gen_prefix + " " + input_text + " " + gen_prefix
+        
         semantic_tokens = text_to_semantic_new(
             input_text,
             history_prompt=history_prompt,

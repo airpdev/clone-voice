@@ -70,7 +70,6 @@ def root():
 class GenInfo(BaseModel):
     voice_id: str
     transcript: str
-    prefix: str
 
 @app.post("/generate_voice")
 @limiter.limit("500/minute")
@@ -79,8 +78,7 @@ async def generate_voice(request: Request, payload: GenInfo):
     voice_response = await loop.run_in_executor(None, 
                                                 process_generate_voice, 
                                                 payload.voice_id, 
-                                                payload.transcript, 
-                                                payload.prefix)
+                                                payload.transcript)
     return voice_response
 
 @app.post("/clean_voice")
@@ -210,8 +208,6 @@ async def clone_voice(request: Request, payload: CloneInfo):
     print("finished cloning with rvc model")
     print(s3_url)
 
-    if payload.gen_prefix == "music":
-        return {"status" : "success", "voice_id" : payload.voice_id, "voice_url" : s3_url, "voice_clean_data" : ""}
     response = await loop.run_in_executor(None, cleanvoice, s3_url)
     return {"status" : "success", "voice_id" : payload.voice_id, "voice_url" : s3_url, "voice_clean_data" : response}
 
@@ -281,26 +277,25 @@ def remove_silence(audio, silence_threshold=-50, min_silence_duration=500):
     return non_silent_audio
 
 def get_reference(file_path, voice_id):
-    reference_path = "references/reference-rob1.wav" #"output/" + voice_id + "_ref.wav"
+    reference_path = "references/" + voice_id + "_ref.wav"
     if os.path.exists(reference_path):
         return reference_path
     audio = AudioSegment.from_file(file_path)
     modified_audio = remove_silence(audio)
-    adjusted_audio = modified_audio.apply_gain(4)
     desilenced_path = str(uuid.uuid4()) + ".wav"
-    adjusted_audio.export(desilenced_path, format="wav")
+    modified_audio.export(desilenced_path, format="wav")
 
     audio_duration = get_audio_duration(desilenced_path)
-    if audio_duration < 13.0:
+    if audio_duration < 12.0:
         return None
         
     command = [
         "ffmpeg",
         "-i", desilenced_path,
         "-ss", str(0.0),
-        "-to", str(13.0),
+        "-to", str(12.0),
         "-vn",
-        "-c:a", "pcm_s16le",
+        "-c:a", "pcm_s24le",
         "-ar", str(model.sample_rate),
         "-ac", str(model.channels),
         reference_path
@@ -338,38 +333,32 @@ def process_add_voice(dataset_region: str,
     except Exception:
         return {"status" : "failed", "msg" : "failed to download dataset for training rvc model."}
     if reference_path == None:
-        return {"status" : "failed", "msg" : "failed to get reference audio for using in bark model."}
+        return {"status" : "failed", "msg" : "failed to get reference audio."}
     # generate voice.npz for bark model ###########################################################################################
-    bark_model_path = 'bark/assets/prompts/' + voice_id + '.npz'
-    if os.path.exists(bark_model_path):
-        os.remove(bark_model_path)
-    # bark_ref_name = uuid.uuid4()
-    # bark_ref_path = "output/" + str(bark_ref_name) + ".wav"
-    # bark_ref_path = download_s3_file(bark_ref_region, bark_ref_bucket, bark_ref_key, bark_ref_path)
-    # bark_ref_output = bark_ref_path + ".wav"
-    # # getting semantic_tokens 
-    bark_ref_output = reference_path + ".wav"
-    stream = ffmpeg.input(reference_path)
-    stream = ffmpeg.output(stream, bark_ref_output, acodec='pcm_s16le', ar=model.sample_rate, ac=model.channels)
-    ffmpeg.run(stream)
-    wav, sr = torchaudio.load(bark_ref_output)
-    semantic_vectors = hubert_model.forward(wav, input_sample_hz=sr)
-    semantic_tokens = tokenizer.get_token(semantic_vectors)
-    # getting npz 
-    wav = wav.unsqueeze(0).to(device)
-    # Extract discrete codes from EnCodec
-    with torch.no_grad():
-        encoded_frames = model.encode(wav)
-    codes = torch.cat([encoded[0] for encoded in encoded_frames], dim=-1).squeeze()  # [n_q, T]
-    # move codes to cpu
-    codes = codes.cpu().numpy()
-    np.savez(bark_model_path, fine_prompt=codes, coarse_prompt=codes[:2, :], semantic_prompt=semantic_tokens)
+    # bark_model_path = 'bark/assets/prompts/' + voice_id + '.npz'
+    # if os.path.exists(bark_model_path):
+    #     os.remove(bark_model_path)
+    # bark_ref_output = reference_path + ".wav"
+    # stream = ffmpeg.input(reference_path)
+    # stream = ffmpeg.output(stream, bark_ref_output, acodec='pcm_s16le', ar=model.sample_rate, ac=model.channels)
+    # ffmpeg.run(stream)
+    # wav, sr = torchaudio.load(bark_ref_output)
+    # semantic_vectors = hubert_model.forward(wav, input_sample_hz=sr)
+    # semantic_tokens = tokenizer.get_token(semantic_vectors)
+    # # getting npz 
+    # wav = wav.unsqueeze(0).to(device)
+    # # Extract discrete codes from EnCodec
+    # with torch.no_grad():
+    #     encoded_frames = model.encode(wav)
+    # codes = torch.cat([encoded[0] for encoded in encoded_frames], dim=-1).squeeze()  # [n_q, T]
+    # # move codes to cpu
+    # codes = codes.cpu().numpy()
+    # np.savez(bark_model_path, fine_prompt=codes, coarse_prompt=codes[:2, :], semantic_prompt=semantic_tokens)
     
     # train rvc model ################################################################################################################
     rvc_model_path = "./data/models/rvc/" + voice_id + "/" + voice_id + ".pth"
     if os.path.exists(rvc_model_path):
         os.remove(rvc_model_path)
-    os.remove(bark_ref_output)
     asyncio.run(train_rvc_model(voice_id, dataset_path))
     return {"status" : "success", "voice_id" : voice_id, "msg" : "voice has been added successfully."}
 
@@ -465,6 +454,7 @@ def process_rvc_model(voice_id: str, candidate_array):
         output_path = "output/" + str(rvc_uuid) + ".wav"
         write_wav(output_path, audio_rvc[0], audio_rvc[1])
         result_array.append(output_path)
+        os.remove(bvoice_path)
     return result_array
 
 def get_transcript_similarity(file_path, expected_text):
@@ -653,32 +643,34 @@ def get_voice(url: str):
     time.sleep(3)
     return get_voice(url)
 
-def process_generate_voice(voice_id: str, transcript: str, prefix: str):
-    if prefix == "music":
-        transcript = "♪ " + transcript + " ♪"
-    audio_array = generate_audio(transcript)
-    
+from TTS.api import TTS
+tts = TTS(model_name="voice_conversion_models/multilingual/vctk/freevc24", progress_bar=False).to("cuda")
+def process_generate_voice(voice_id: str, transcript: str):
+    voices = []
+    audio_array = generate_audio_new(transcript, history_prompt="v2/en_speaker_1")
     output_path = "output/" + str(uuid.uuid4()) + ".wav"
     write_wav(output_path, SAMPLE_RATE, audio_array)
-
-    voices = []
-    voices.append(output_path)
-    # converted_array = process_rvc_model(voice_id, voices)
-
-    bucket_name = 'voice-dev1'
-    object_name = 'tmp_audio/' + str(uuid.uuid4()) + ".wav"
-    extra_args = {'ACL': 'public-read'}
-    session = boto3.Session(
-        aws_access_key_id=AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=AWS_SECRET_ACCESS_KEY
-    )
-    s3 = session.client('s3')
-    s3.upload_file(output_path, bucket_name, object_name, ExtraArgs=extra_args)
-    s3_url = "https://{}.s3.us-east-2.amazonaws.com/{}".format(bucket_name, object_name)
+    tts.voice_conversion_to_file(source_wav=output_path, target_wav=get_reference("", voice_id), file_path= output_path + ".wav")
     os.remove(output_path)
-    # os.remove(converted_array[0])
-    return {"status" : "success", "voice_id" : voice_id, "voice_url" : s3_url}
+    voices.append(output_path + ".wav")
+        
+    converted_array = process_rvc_model(voice_id, voices)
+    s3_urls = []
+    for item in converted_array:
+        bucket_name = 'voice-dev1'
+        object_name = 'tmp_audio/' + str(uuid.uuid4()) + ".wav"
+        extra_args = {'ACL': 'public-read'}
+        session = boto3.Session(
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY
+        )
+        s3 = session.client('s3')
+        s3.upload_file(item, bucket_name, object_name, ExtraArgs=extra_args)
+        s3_url = "https://{}.s3.us-east-2.amazonaws.com/{}".format(bucket_name, object_name)
+        s3_urls.append(s3_url)
+        os.remove(item)
 
+    return {"status" : "success", "voice_id" : voice_id, "voice_urls" : s3_urls}
 
 def download_s3_file(voice_region: str, 
                     voice_bucket: str, 

@@ -35,6 +35,7 @@ from hubert.hubert_manager import HuBERTManager
 from Levenshtein import distance
 from pydantic import BaseModel
 from urllib.parse import urlparse
+from TTS.api import TTS
 
 class TranscriptInfo:
     def __init__(self, file_path, transcript_similarity):
@@ -62,6 +63,7 @@ model = load_codec_model(use_gpu=torch.cuda.is_available())
 cleanvoice_url = "https://api.cleanvoice.ai/v1/edits"
 nltk.download('punkt')
 lock = asyncio.Lock()
+tts = TTS(model_name="voice_conversion_models/multilingual/vctk/freevc24", progress_bar=False).to("cuda")
 
 @app.get("/")
 def root():
@@ -103,11 +105,6 @@ async def add_voice(request: Request, payload: AddVoiceInfo):
                                         payload.dataset_bucket, 
                                         payload.dataset_key)
     return response
-
-class CloneInfo(BaseModel):
-    voice_id: str
-    transcript: str
-    total_try_count: int
 
 class ConvertInfo(BaseModel):
     voice_id: str
@@ -162,20 +159,22 @@ async def convert_voice(request: Request, payload: ConvertInfo):
     s3_url = "https://{}.s3.us-east-2.amazonaws.com/{}".format(bucket_name, object_name)
     return {"status" : "success", "voice_id" : payload.voice_id, "voice_url" : s3_url}
 
+class CloneInfo(BaseModel):
+    voice_id: str
+    transcript: str
+    total_try_count: int
+
 @app.post("/clone_voice")
 @limiter.limit("500/minute")
 async def clone_voice(request: Request, payload: CloneInfo):
-    voice_output_path = 'bark/assets/prompts/' + payload.voice_id + '.npz'
     model_path = payload.voice_id + "/" + payload.voice_id + ".pth"
-    if os.path.exists(voice_output_path) == False:
-        return {"status" : "failed", "voice_id" : payload.voice_id, "msg" : "npz file for voice isn't existed."}
     if os.path.exists("./data/models/rvc/" + model_path) == False:
         return {"status" : "failed", "voice_id" : payload.voice_id, "msg" : "pth file for voice isn't existed."}
 
     loop = asyncio.get_event_loop()
     sentences = nltk.sent_tokenize(payload.transcript)
     print(sentences)
-    silence = np.zeros(int(0.03 * SAMPLE_RATE))  
+    silence = np.zeros(int(0.02 * SAMPLE_RATE))  
     selected_files = []
     temp_files = []
     for sentence in sentences:
@@ -184,14 +183,24 @@ async def clone_voice(request: Request, payload: CloneInfo):
                                         payload.voice_id, 
                                         sentence, 
                                         payload.total_try_count)
-        selected_array = filter_audio_array(cadidate_array, 1, get_reference("", payload.voice_id), sentence)
-        selected_files.append(selected_array[0])
+        selected_path = filter_audio_array(cadidate_array, get_reference("", payload.voice_id), sentence)
+        if selected_path != None:
+            selected_files.append(selected_path)
         for path in cadidate_array:
             temp_files.append(path)
     
     audio_name = uuid.uuid4()
     output_path = "output/" + str(audio_name) + ".wav"
     merge_audio_files(selected_files, output_path)
+
+    voices = []
+    tts.voice_conversion_to_file(source_wav=output_path, target_wav=get_reference("", payload.voice_id), file_path= output_path + ".wav")
+    os.remove(output_path)
+    voices.append(output_path + ".wav")
+    # voices.append(output_path)
+
+    converted_array = process_rvc_model(payload.voice_id, voices)
+
     bucket_name = 'voice-dev1'
     object_name = 'tmp_audio/' + str(audio_name) + ".wav"
     extra_args = {'ACL': 'public-read'}
@@ -200,22 +209,17 @@ async def clone_voice(request: Request, payload: CloneInfo):
         aws_secret_access_key=AWS_SECRET_ACCESS_KEY
     )
     s3 = session.client('s3')
-    s3.upload_file(output_path, bucket_name, object_name, ExtraArgs=extra_args)
+    s3.upload_file(converted_array[0], bucket_name, object_name, ExtraArgs=extra_args)
     s3_url = "https://{}.s3.us-east-2.amazonaws.com/{}".format(bucket_name, object_name)
     
+    os.remove(converted_array[0])
     for temp in temp_files:
         os.remove(temp)
-    print("finished cloning with rvc model")
-    print(s3_url)
+
+    # return {"status" : "success", "voice_id" : payload.voice_id, "voice_url" : s3_url}
 
     response = await loop.run_in_executor(None, cleanvoice, s3_url)
     return {"status" : "success", "voice_id" : payload.voice_id, "voice_url" : s3_url, "voice_clean_data" : response}
-
-    # response_arry = []
-    # for s3_url in s3_urls:
-    #     response = await loop.run_in_executor(None, cleanvoice, s3_url)
-    #     response_arry.append(response)
-    # return {"status" : "success", "voice_id" : payload.voice_id, "voice_urls" : s3_urls, "voice_clean_data" : response_arry}
 
 class ProsodyInfo(BaseModel):
     voice_id: str
@@ -250,24 +254,24 @@ def process_prosody_select(voice_id: str,
         tmp_path = download_file_url(url, tmp_path)
         if len(tmp_path) > 0:
             audio_array.append(tmp_path)
-    selected_array = []
-    for bark_voice in filter_audio_array(audio_array, candidate_count, reference_path, transcript):
-        print(bark_voice)
-        bucket_name = 'voice-dev1'
-        audio_name = uuid.uuid4()
-        object_name = 'tmp_audio/' + str(audio_name) + ".wav"
-        extra_args = {'ACL': 'public-read'}
-        session = boto3.Session(
-            aws_access_key_id=AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=AWS_SECRET_ACCESS_KEY
-        )
-        s3 = session.client('s3')
-        s3.upload_file(bark_voice, bucket_name, object_name, ExtraArgs=extra_args)
-        s3_url = "https://{}.s3.us-east-2.amazonaws.com/{}".format(bucket_name, object_name)
-        selected_array.append(s3_url)
+
+    bark_voice = filter_audio_array(audio_array, reference_path, transcript)
+    print(bark_voice)
+    bucket_name = 'voice-dev1'
+    audio_name = uuid.uuid4()
+    object_name = 'tmp_audio/' + str(audio_name) + ".wav"
+    extra_args = {'ACL': 'public-read'}
+    session = boto3.Session(
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY
+    )
+    s3 = session.client('s3')
+    s3.upload_file(bark_voice, bucket_name, object_name, ExtraArgs=extra_args)
+    s3_url = "https://{}.s3.us-east-2.amazonaws.com/{}".format(bucket_name, object_name)
+
     for temp in audio_array:
         os.remove(temp)
-    return {"status" : "success", "voice_id" : voice_id, "msg" : "", "voice_urls": selected_array}
+    return {"status" : "success", "voice_id" : voice_id, "msg" : "", "voice_url": s3_url}
 
 def remove_silence(audio, silence_threshold=-50, min_silence_duration=500):
     non_silent_audio = AudioSegment.empty()
@@ -277,7 +281,8 @@ def remove_silence(audio, silence_threshold=-50, min_silence_duration=500):
     return non_silent_audio
 
 def get_reference(file_path, voice_id):
-    reference_path = "references/" + voice_id + "_ref.wav"
+    reference_path = "references/reference-carolyn.wav"
+    # reference_path = "references/" + voice_id + "_ref.wav"
     if os.path.exists(reference_path):
         return reference_path
     audio = AudioSegment.from_file(file_path)
@@ -335,25 +340,25 @@ def process_add_voice(dataset_region: str,
     if reference_path == None:
         return {"status" : "failed", "msg" : "failed to get reference audio."}
     # generate voice.npz for bark model ###########################################################################################
-    # bark_model_path = 'bark/assets/prompts/' + voice_id + '.npz'
-    # if os.path.exists(bark_model_path):
-    #     os.remove(bark_model_path)
-    # bark_ref_output = reference_path + ".wav"
-    # stream = ffmpeg.input(reference_path)
-    # stream = ffmpeg.output(stream, bark_ref_output, acodec='pcm_s16le', ar=model.sample_rate, ac=model.channels)
-    # ffmpeg.run(stream)
-    # wav, sr = torchaudio.load(bark_ref_output)
-    # semantic_vectors = hubert_model.forward(wav, input_sample_hz=sr)
-    # semantic_tokens = tokenizer.get_token(semantic_vectors)
-    # # getting npz 
-    # wav = wav.unsqueeze(0).to(device)
-    # # Extract discrete codes from EnCodec
-    # with torch.no_grad():
-    #     encoded_frames = model.encode(wav)
-    # codes = torch.cat([encoded[0] for encoded in encoded_frames], dim=-1).squeeze()  # [n_q, T]
-    # # move codes to cpu
-    # codes = codes.cpu().numpy()
-    # np.savez(bark_model_path, fine_prompt=codes, coarse_prompt=codes[:2, :], semantic_prompt=semantic_tokens)
+    bark_model_path = 'bark/assets/prompts/' + voice_id + '.npz'
+    if os.path.exists(bark_model_path):
+        os.remove(bark_model_path)
+    bark_ref_output = reference_path + ".wav"
+    stream = ffmpeg.input(reference_path)
+    stream = ffmpeg.output(stream, bark_ref_output, acodec='pcm_s16le', ar=model.sample_rate, ac=model.channels)
+    ffmpeg.run(stream)
+    wav, sr = torchaudio.load(bark_ref_output)
+    semantic_vectors = hubert_model.forward(wav, input_sample_hz=sr)
+    semantic_tokens = tokenizer.get_token(semantic_vectors)
+    # getting npz 
+    wav = wav.unsqueeze(0).to(device)
+    # Extract discrete codes from EnCodec
+    with torch.no_grad():
+        encoded_frames = model.encode(wav)
+    codes = torch.cat([encoded[0] for encoded in encoded_frames], dim=-1).squeeze()  # [n_q, T]
+    # move codes to cpu
+    codes = codes.cpu().numpy()
+    np.savez(bark_model_path, fine_prompt=codes, coarse_prompt=codes[:2, :], semantic_prompt=semantic_tokens)
     
     # train rvc model ################################################################################################################
     rvc_model_path = "./data/models/rvc/" + voice_id + "/" + voice_id + ".pth"
@@ -392,11 +397,10 @@ async def train_rvc_model(voice_id: str, dataset_path : str):
 def process_clone_voice(voice_id: str, 
                         transcript: str, 
                         total_try_count: int):
-    voice_output_path = 'bark/assets/prompts/' + voice_id + '.npz'
     current_directory = os.path.abspath(os.getcwd())
     dataset_path = current_directory + "/dataset/" + voice_id + "/"
     if os.path.exists(dataset_path) == False:
-        os.mkdir(dataset_path)
+        os.makedirs(dataset_path, exist_ok=True)
 
     bark_voices = []
     max_threads_count = 1
@@ -409,7 +413,7 @@ def process_clone_voice(voice_id: str,
             voice_name = uuid.uuid4()
             output_path = "output/" + str(voice_name) + ".wav"
             bark_voices.append(output_path)
-            thread = threading.Thread(target=generate, args=(transcript, voice_output_path, output_path))
+            thread = threading.Thread(target=generate, args=(transcript, output_path))
             thread.start()
             threads.append(thread)
     
@@ -417,28 +421,7 @@ def process_clone_voice(voice_id: str,
             thread.join()
         thread_index = thread_index + max_threads_count
 
-    # s3_urls = [] 
-    candidate_array = process_rvc_model(voice_id, bark_voices)
-
-    # for bark_voice in candidate_array:
-    #     bucket_name = 'voice-dev1'
-    #     audio_name = uuid.uuid4()
-    #     object_name = 'tmp_audio/' + str(audio_name) + ".wav"
-    #     extra_args = {'ACL': 'public-read'}
-    #     session = boto3.Session(
-    #         aws_access_key_id=AWS_ACCESS_KEY_ID,
-    #         aws_secret_access_key=AWS_SECRET_ACCESS_KEY
-    #     )
-    #     s3 = session.client('s3')
-    #     s3.upload_file(bark_voice, bucket_name, object_name, ExtraArgs=extra_args)
-    #     s3_url = "https://{}.s3.us-east-2.amazonaws.com/{}".format(bucket_name, object_name)
-    #     os.remove(bark_voice)
-    #     s3_urls.append(s3_url)
-
-    for temp in bark_voices:
-        os.remove(temp)
-
-    return candidate_array
+    return bark_voices
 
 def process_rvc_model(voice_id: str, candidate_array):
     result_array = []
@@ -514,9 +497,14 @@ def filter_duration_array(audio_files, duration_count):
         filter_array.append(sorted_duration_array[index])
     return filter_array
 
-def filter_transcript_array(audio_files, count, transcript):
-    sorted_score_array = sorted(audio_files, key=lambda x:get_transcript_similarity(x, transcript), reverse=True)
+def filter_transcript_array(audio_files, transcript):
     filter_array = []
+    sorted_score_array = sorted(audio_files, key=lambda x:get_transcript_similarity(x, transcript), reverse=True)
+    if len(sorted_score_array) == 1:
+        filter_array.append(sorted_score_array[0])
+        return filter_array
+
+    count = len(sorted_score_array) - int(len(sorted_score_array) / 2)
     for index in range(0, count):    
         filter_array.append(sorted_score_array[index])
     return filter_array
@@ -539,32 +527,22 @@ def filter_prosody_array(audio_files, reference_path, transcript):
     #     if info.transcript_similarity > 0.8:
     #         sorted_transcript_array.append(info.file_path)
     # sorted_score_array = sorted(audio_files, key=lambda x:get_prosody_similarity(x, reference_path))
-    sorted_transcript_array = filter_transcript_array(audio_files, int(len(audio_files) / 2), transcript)
+    sorted_transcript_array = filter_transcript_array(audio_files, transcript)
     sorted_score_array = sorted(sorted_transcript_array, key=lambda x:get_mean_pitch(x), reverse=True)
     filtered_array = []
-    if len(sorted_score_array) > 0:
-        filtered_array.append(sorted_score_array[0])
-    if len(sorted_score_array) > 1:
-        filtered_array.append(sorted_score_array[1])
-    if len(sorted_score_array) > 2:
-        filtered_array.append(sorted_score_array[2])
+    count = len(sorted_score_array) - int(len(sorted_score_array) / 3)
+    for index in range(0, count):    
+        filtered_array.append(sorted_score_array[index])
     duration_array = filter_duration_array(filtered_array, 1)
     return duration_array
 
-def filter_audio_array(file_array, candidate_count, reference_input, transcript):
-    candidate_array = []
+def filter_audio_array(file_array, reference_input, transcript):
     sorted_array = filter_prosody_array(file_array, reference_input, transcript)
-    # reference_loudness = get_lufs(reference_input)
-    if candidate_count > len(sorted_array):
-        candidate_count = len(sorted_array)
-    for index in range(0, candidate_count):    
-        # candidate_loudness = get_lufs(sorted_array[index])
-        # equal_lufs(sorted_array[index], float(reference_loudness) - float(candidate_loudness))
-        candidate_array.append(sorted_array[index])
+    if len(sorted_array) > 0:
+        return sorted_array[0]
+    return None
 
-    return candidate_array
-
-def generate(transcript, voice_output_path, output_path):
+def generate(transcript, output_path):
     # sentences = nltk.sent_tokenize(transcript.replace("\n", " ").strip())
     # print(sentences)
     # silence = np.zeros(int(0.03 * SAMPLE_RATE))  # quarter second of silence
@@ -574,7 +552,7 @@ def generate(transcript, voice_output_path, output_path):
     #     pieces += [audio_array, silence.copy()]
 
     # write_wav(output_path, SAMPLE_RATE, np.concatenate(pieces))
-    audio_array = generate_audio_new(transcript, history_prompt=voice_output_path)
+    audio_array = generate_audio_new(transcript, history_prompt="v2/en_speaker_0")
     write_wav(output_path, SAMPLE_RATE, audio_array)
 
 def get_lufs(file_path):
@@ -643,11 +621,10 @@ def get_voice(url: str):
     time.sleep(3)
     return get_voice(url)
 
-from TTS.api import TTS
-tts = TTS(model_name="voice_conversion_models/multilingual/vctk/freevc24", progress_bar=False).to("cuda")
 def process_generate_voice(voice_id: str, transcript: str):
     voices = []
-    audio_array = generate_audio_new(transcript, history_prompt="v2/en_speaker_1")
+    voice_npz_path = 'bark/assets/prompts/' + voice_id + '.npz'
+    audio_array = generate_audio_new(transcript, history_prompt="v2/en_speaker_0")
     output_path = "output/" + str(uuid.uuid4()) + ".wav"
     write_wav(output_path, SAMPLE_RATE, audio_array)
     tts.voice_conversion_to_file(source_wav=output_path, target_wav=get_reference("", voice_id), file_path= output_path + ".wav")
@@ -655,6 +632,7 @@ def process_generate_voice(voice_id: str, transcript: str):
     voices.append(output_path + ".wav")
         
     converted_array = process_rvc_model(voice_id, voices)
+
     s3_urls = []
     for item in converted_array:
         bucket_name = 'voice-dev1'

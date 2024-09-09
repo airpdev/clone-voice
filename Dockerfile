@@ -6,35 +6,10 @@ RUN apt update -y
 RUN apt install python3 python3-pip -y
 RUN apt install -y ffmpeg
 RUN pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu117
-RUN pip3 install boto3==1.28.53
-RUN pip3 install funcy==2.0
-RUN pip3 install soundfile==0.12.1
-RUN pip3 install sox==1.4.1
-RUN pip3 install fairseq==0.12.2
-RUN pip3 install joblib==1.3.2
-RUN pip3 install ffmpeg-python==0.2.0
-RUN pip3 install encodec==0.1.1
-RUN pip3 install huggingface-hub==0.17.3
-RUN pip3 install numpy==1.23.5
-RUN pip3 install scipy==1.11.2
-RUN pip3 install tokenizers==0.13.3
-RUN pip3 install tqdm==4.66.1
-RUN pip3 install transformers==4.33.2
-RUN pip3 install faiss-cpu==1.7.3
-RUN pip3 install pandas==2.1.1
-RUN pip3 install praat-parselmouth==0.4.2
-RUN pip3 install pyworld==0.3.2
-RUN pip3 install torchcrepe==0.0.20
-RUN pip3 install noisereduce==3.0.0
-RUN pip3 install audiolm-pytorch==1.5.1
-RUN pip3 install librosa==0.9.1
 RUN pip3 install "fastapi[all]"
-RUN pip3 install python-Levenshtein==0.22.0
-RUN pip3 install SpeechRecognition==3.10.0
-RUN pip3 install asyncio==3.4.3
-RUN pip3 install pydub==0.25.1
-RUN pip3 install requests==2.25.1
 RUN pip3 install slowapi==0.1.8
-RUN pip3 install nltk==3.8.1
-CMD [ "uvicorn", "main:app", "--env-file", ".env", "--host", "0.0.0.0", "--port", "8080"]
+RUN pip3 install ffmpeg-python==0.2.0
+RUN pip3 install asyncio==3.4.3
+RUN pip3 install requests==2.25.1
+CMD [ "uvicorn", "test_clean:app", "--host", "0.0.0.0", "--port", "8080"]
 EXPOSE 8080

@@ -8,6 +8,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from pydantic import BaseModel
+from spleeter.separator import Separator
 
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI()
@@ -22,6 +23,20 @@ ELEVENLABS_API_KEY = "sk_ea133ae12a60b1acb72896e7e315f2ea7454ae178cac0a05"
 @app.get("/")
 def root():
     return time.time()
+
+class MusicInfo(BaseModel):
+    music_path: str
+    
+@app.post("/separate_music")
+@limiter.limit("500/minute")
+async def separate_music(request: Request, payload: MusicInfo):
+    separator = Separator('spleeter:2stems')
+    output_dir = 'output/'
+    separator.separate_to_file(payload.music_path, output_dir)
+    base_name = os.path.splitext(os.path.basename(payload.music_path))[0]
+    vocal_path = os.path.join(output_dir, base_name, 'vocals.wav')
+    accompaniment_path = os.path.join(output_dir, base_name, 'accompaniment.wav')
+    return {"accompaniment_path" : accompaniment_path}
 
 class CleanInfo(BaseModel):
     voice_url: str

@@ -3,3 +3,5 @@ output/
 data/
 dataset/
 **/pycache/**
+pretrained_models/
+resources/

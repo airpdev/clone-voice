@@ -9,6 +9,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from pydantic import BaseModel
 from spleeter.separator import Separator
+import os
 
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI()
@@ -17,8 +18,8 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 cleanvoice_url = "https://api.cleanvoice.ai/v1/edits"
 elevenlabs_url = "https://api.elevenlabs.io/v1/voices"
 
-CLEAN_VOICE_KEY = "Sr7d2GRA42LJNjVj7cWNjKqhPiX2vLAi"
-ELEVENLABS_API_KEY = "sk_ea133ae12a60b1acb72896e7e315f2ea7454ae178cac0a05" 
+CLEAN_VOICE_KEY = ""
+ELEVENLABS_API_KEY = "" 
 
 @app.get("/")
 def root():

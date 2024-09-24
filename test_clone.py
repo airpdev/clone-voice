@@ -57,9 +57,9 @@ def train_rvc_model(voice_id: str, dataset_path : str):
         # create index file
         response = rvc_ws.create_index(rvc_workspace)
         # train rvc model 
-        response = rvc_ws.train_model(rvc_workspace, 'f0', 11)
+        response = rvc_ws.train_model(rvc_workspace, 'f0', 101)
         # copy to RVC models
-        response = rvc_ws.copy_model(rvc_workspace, "e_10")
+        response = rvc_ws.copy_model(rvc_workspace, "e_100")
         return 1
     except Exception as e:
         print(e)
@@ -144,10 +144,11 @@ def get_reference(file_path, voice_id):
 # bark_generated_path = process_generate_voice("voice4", script, "references/reference.wav")
 # print("bark:", bark_generated_path)
 
-# status = train_rvc_model("voice1", "/dataset/")
-# print("training:", status)
+print("started training")
+status = train_rvc_model("voice", "/dataset/")
+print("training:", status)
 
-# output_path = process_rvc_model("voice1", bark_generated_path)
-# print("rvc:", output_path)
+output_path = process_rvc_model("voice", "resources/input1.wav")
+print("rvc:", output_path)
 
 # print("ref:", get_reference("references/dataset.wav", "voice1"))

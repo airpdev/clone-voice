@@ -5,3 +5,5 @@ dataset/
 **/pycache/**
 pretrained_models/
 resources/
+clone-voice/
+testenv/

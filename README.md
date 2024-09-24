@@ -28,3 +28,22 @@
   * Description: Select the closest audios (candidate count) with reference audio.
 
 
+## 🚀 Generating/Cloning voice
+
+* You need to create the account in elevenlabs.ai.
+
+- Using docker
+  * sudo docker build -t clone-voice .
+  * sudo docker run --gpus all -d --rm -p 8080:8080 clone-voice  
+
+- Using uvicorn
+  * uvicorn test_clean:app --host 0.0.0.0 --port 8080
+
+- APIs
+  * Generating speech with narrator's voice and the given text:
+    (Post) http://34.45.132.232:8080/clone_voice
+    Input: {
+             "transcript": "No one would have believed. In the last years of the nineteenth century"
+           }
+  * Voice conversion of singer's song
+    Command: python test_clone.py

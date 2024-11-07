@@ -148,7 +148,7 @@ print("started training")
 status = train_rvc_model("voice", "/dataset/")
 print("training:", status)
 
-output_path = process_rvc_model("voice", "resources/input1.wav")
+output_path = process_rvc_model("voice", "resources/reference.mp3")
 print("rvc:", output_path)
 
 # print("ref:", get_reference("references/dataset.wav", "voice1"))

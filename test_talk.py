@@ -43,7 +43,7 @@ app = FastAPI()
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-openai.api_key = "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"
+openai.api_key = ""
 
 @app.get("/")
 def root():
